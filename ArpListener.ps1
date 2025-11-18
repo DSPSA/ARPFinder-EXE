@@ -1,14 +1,13 @@
 <#
 .SYNOPSIS
-    Écouteur simple de la table ARP/voisins qui affiche les nouveaux appareils découverts.
+    Simple listener for the ARP/neighbor table that shows newly discovered devices.
 
 .DESCRIPTION
-    Interroge périodiquement la table des voisins et signale les paires IP/MAC
-    qui n'ont pas encore été vues. Utilise Get-NetNeighbor au lieu d'analyser
-    la sortie de arp.exe.
+    Periodically queries the neighbor table and reports IP/MAC pairs that have
+    not been seen before. Uses Get-NetNeighbor instead of parsing arp.exe output.
 
 .PARAMETER IntervalMs
-    Intervalle d’interrogation en millisecondes (par défaut : 1000 ms).
+    Polling interval in milliseconds (default: 1000 ms).
 
 .EXAMPLE
     .\Start-ArpListener.ps1 -IntervalMs 2000
@@ -21,10 +20,10 @@ param(
     $IntervalMs = 1000
 )
 
-Write-Host '=== Écouteur ARP / Voisins (quasi temps réel) ==='
-Write-Host 'Appuyez sur CTRL+C pour arrêter.`n'
+Write-Host "=== ARP / Neighbor listener (near real time) ==="
+Write-Host "Press CTRL+C to stop.`n"
 
-# Hashtable : clé = "ip-mac", valeur = [datetime] première détection
+# Hashtable: key = "ip-mac", value = [datetime] first detection
 $known = @{}
 
 function Get-MacVendor {
@@ -38,12 +37,15 @@ function Get-MacVendor {
     $prefix6 = $clean.Substring(0, 6).ToUpper()
     $prefix7 = if ($clean.Length -ge 7) { $clean.Substring(0, 7).ToUpper() } else { $null }
 
-    $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
-    $candidates = @(
-        Join-Path $dir 'manuf',
-        Join-Path $dir 'oui.txt',
-        Join-Path $dir 'nmap-mac-prefixes'
-    )
+    # Resolve a base directory for optional OUI files; fall back to current location if needed
+    $dir = $PSScriptRoot
+    if (-not $dir -and $MyInvocation.MyCommand.Path) {
+        $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    }
+    if (-not $dir) { $dir = (Get-Location).Path }
+
+    $candidateNames = @('manuf', 'oui.txt', 'nmap-mac-prefixes')
+    $candidates = $candidateNames | ForEach-Object { Join-Path -Path $dir -ChildPath $_ }
     $file = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $file) { return $null }
 
@@ -93,7 +95,7 @@ function Get-NeighborName {
 
 while ($true) {
     try {
-        # Interroge la table des voisins : Reachable et Stale sont intéressants
+        # Query neighbor table and keep Reachable/Stale entries
         $neighbors = Get-NetNeighbor -ErrorAction Stop |
             Where-Object {
                 $_.State -in @('Reachable', 'Stale') -and
@@ -105,7 +107,7 @@ while ($true) {
         foreach ($n in $neighbors) {
             $ip  = $n.IPAddress
             $mac = $n.LinkLayerAddress.ToLower()
-            # Format explicit pour éviter les guillemets doubles
+            # Explicit format to avoid double quotes in concatenation
             $id  = '{0}-{1}' -f $ip, $mac
 
             if (-not $known.ContainsKey($id)) {
@@ -114,10 +116,10 @@ while ($true) {
 
                 $hostname = Get-NeighborName -Ip $ip
                 $vendor   = Get-MacVendor -Mac $mac
-                $nameSuffix = if ($hostname) { " ; nom : $hostname" } else { "" }
-                $vendorSuffix = if ($vendor) { " ; constructeur : $vendor" } else { "" }
+                $nameSuffix = if ($hostname) { " ; name: $hostname" } else { "" }
+                $vendorSuffix = if ($vendor) { " ; vendor: $vendor" } else { "" }
 
-                $msg = '[{0:HH:mm:ss}] [+] NOUVEL APPAREIL : {1} -> {2} (interface : {3}{4}{5})' -f `
+                $msg = '[{0:HH:mm:ss}] [+] NEW DEVICE: {1} -> {2} (interface: {3}{4}{5})' -f `
                     $firstSeen, $ip, $mac, $n.InterfaceAlias, $nameSuffix, $vendorSuffix
 
                 Write-Host $msg -ForegroundColor Green
@@ -125,7 +127,7 @@ while ($true) {
         }
     }
     catch {
-        Write-Warning ('Échec de l''interrogation de la table des voisins : {0}' -f $_.Exception.Message)
+        Write-Warning ('Failed to query the neighbor table: {0}' -f $_.Exception.Message)
     }
 
     Start-Sleep -Milliseconds $IntervalMs

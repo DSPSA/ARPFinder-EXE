@@ -2,33 +2,31 @@
 setlocal EnableDelayedExpansion
 
 rem ==========================================
-rem  Ce script :
-rem    1) genere ArpListener.ps1 dans le meme dossier courant
-rem    2) lance ArpListener.ps1 avec ExecutionPolicy Bypass
+rem  This script:
+rem    1) generates ArpListener.ps1 in the current directory
+rem    2) launches ArpListener.ps1 with ExecutionPolicy Bypass
 rem ==========================================
 
-rem Place le .ps1 dans le dossier courant (la ou le .cmd est lance)
 set "SCRIPT=%CD%\ArpListener.ps1"
 
-echo Creation du script PowerShell : "%SCRIPT%"
-rem Ecrit le contenu du script en UTF-8 exact via un tableau de lignes (pas de here-string)
+echo Creating PowerShell script: "%SCRIPT%"
+rem Write the script content in exact UTF-8 via an array of lines (no here-strings)
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 "$lines = @(
 '<#'
 '.SYNOPSIS'
-'    Ecouteur simple de la table ARP/voisins qui affiche les nouveaux appareils decouverts.'
+'    Simple listener for the ARP/neighbor table that shows newly discovered devices.'
 ''
 '.DESCRIPTION'
-'    Interroge periodiquement la table des voisins et signale les paires IP/MAC'
-'    qui n''ont pas encore ete vues. Utilise Get-NetNeighbor au lieu d''analyser'
-'    la sortie de arp.exe.'
+'    Periodically queries the neighbor table and reports IP/MAC pairs that have'
+'    not been seen before. Uses Get-NetNeighbor instead of parsing arp.exe output.'
 ''
 '.PARAMETER IntervalMs'
-'    Intervalle d''interrogation en millisecondes (par defaut : 1000 ms).'
+'    Polling interval in milliseconds (default: 1000 ms).'
 ''
 '.EXAMPLE'
-'    .\\Start-ArpListener.ps1 -IntervalMs 2000'
+'    .\Start-ArpListener.ps1 -IntervalMs 2000'
 '#>'
 ''
 '[CmdletBinding()]'
@@ -38,10 +36,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 '    $IntervalMs = 1000'
 ')'
 ''
-'Write-Host ''=== Ecouteur ARP / Voisins (quasi temps reel) ===''' 
-'Write-Host ''Appuyez sur CTRL+C pour arreter.`n''' 
+'Write-Host "=== ARP / Neighbor listener (near real time) ==="'
+'Write-Host "Press CTRL+C to stop.`n"'
 ''
-'# Hashtable : cle = ''ip-mac'', valeur = [datetime] premiere detection'
+'# Hashtable: key = "ip-mac", value = [datetime] first detection'
 '$known = @{}'
 ''
 'function Get-MacVendor {'
@@ -55,12 +53,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 '    $prefix6 = $clean.Substring(0, 6).ToUpper()'
 '    $prefix7 = if ($clean.Length -ge 7) { $clean.Substring(0, 7).ToUpper() } else { $null }'
 ''
-'    $dir = Split-Path -Parent $MyInvocation.MyCommand.Path'
-'    $candidates = @('
-'        Join-Path $dir ''manuf'',
-'        Join-Path $dir ''oui.txt'',
-'        Join-Path $dir ''nmap-mac-prefixes''
-'    )'
+'    # Resolve a base directory for optional OUI files; fall back to current location if needed'
+'    $dir = $PSScriptRoot'
+'    if (-not $dir -and $MyInvocation.MyCommand.Path) {'
+'        $dir = Split-Path -Parent $MyInvocation.MyCommand.Path'
+'    }'
+'    if (-not $dir) { $dir = (Get-Location).Path }'
+'    $candidateNames = @(''manuf'', ''oui.txt'', ''nmap-mac-prefixes'')'
+'    $candidates = $candidateNames | ForEach-Object { Join-Path -Path $dir -ChildPath $_ }'
 '    $file = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1'
 '    if (-not $file) { return $null }'
 ''
@@ -110,7 +110,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 ''
 'while ($true) {'
 '    try {'
-'        # Interroge la table des voisins : Reachable et Stale sont interessants'
+'        # Query neighbor table and keep Reachable/Stale entries'
 '        $neighbors = Get-NetNeighbor -ErrorAction Stop |'
 '            Where-Object {'
 '                $_.State -in @(''Reachable'', ''Stale'') -and'
@@ -122,7 +122,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 '        foreach ($n in $neighbors) {'
 '            $ip  = $n.IPAddress'
 '            $mac = $n.LinkLayerAddress.ToLower()'
-'            # Format explicit pour eviter les guillemets doubles'
+'            # Explicit format to avoid double quotes in concatenation'
 '            $id  = ''{0}-{1}'' -f $ip, $mac'
 ''
 '            if (-not $known.ContainsKey($id)) {'
@@ -131,10 +131,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 ''
 '                $hostname = Get-NeighborName -Ip $ip'
 '                $vendor   = Get-MacVendor -Mac $mac'
-'                $nameSuffix = if ($hostname) { '' ; nom : '' + $hostname } else { '''' }'
-'                $vendorSuffix = if ($vendor) { '' ; constructeur : '' + $vendor } else { '''' }'
+'                $nameSuffix = if ($hostname) { '' ; name: '' + $hostname } else { '''' }'
+'                $vendorSuffix = if ($vendor) { '' ; vendor: '' + $vendor } else { '''' }'
 ''
-'                $msg = ''[{0:HH:mm:ss}] [+] NOUVEL APPAREIL : {1} -> {2} (interface : {3}{4}{5})'' -f `'
+'                $msg = ''[{0:HH:mm:ss}] [+] NEW DEVICE: {1} -> {2} (interface: {3}{4}{5})'' -f `'
 '                    $firstSeen, $ip, $mac, $n.InterfaceAlias, $nameSuffix, $vendorSuffix'
 ''
 '                Write-Host $msg -ForegroundColor Green'
@@ -142,7 +142,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 '        }'
 '    }'
 '    catch {'
-'        Write-Warning (''Echec de l''''interrogation de la table des voisins : {0}'' -f $_.Exception.Message)'
+'        Write-Warning (''Failed to query the neighbor table: {0}'' -f $_.Exception.Message)'
 '    }'
 ''
 '    Start-Sleep -Milliseconds $IntervalMs'
@@ -154,21 +154,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 if errorlevel 1 (
     echo.
-    echo [ERREUR] Impossible de creer le script PowerShell.
-    echo Verifie que PowerShell est disponible et que tu as les droits d'ecriture dans ce dossier.
+    echo [ERROR] Could not create the PowerShell script.
+    echo Verify that PowerShell is available and that you have write permissions in this folder.
     pause
     exit /b 1
 )
 
 echo.
-echo Lancement du script PowerShell...
-echo (politique d'execution contournee pour ce processus uniquement)
+echo Launching the PowerShell script...
+echo (execution policy bypassed for this process only)
 echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%"
 
 echo.
-echo Execution terminee. Fermer cette fenetre ou appuyer sur une touche.
+echo Script finished. Close this window or press any key.
 pause >nul
 
 endlocal
