@@ -17,14 +17,39 @@
 param(
     [int]
     [ValidateRange(100, 60000)]
-    $IntervalMs = 1000
+    $IntervalMs = 1000,
+
+    [Parameter(Mandatory = $false)]
+    [string]
+    $LogFile,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]
+    $InterfaceAlias,
+
+    [Parameter(Mandatory = $false)]
+    [switch]
+    $Scan,
+
+    [Parameter(Mandatory = $false)]
+    [int]
+    $ScanIntervalSec = 60
 )
 
 Write-Host "=== ARP / Neighbor listener (near real time) ==="
 Write-Host "Press CTRL+C to stop.`n"
 
+if ($LogFile) {
+    $LogFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFile)
+    Write-Host "Logging to: $LogFile"
+    if (-not (Test-Path $LogFile)) {
+        "Timestamp,IP,MAC,Interface,Hostname,Vendor" | Out-File -FilePath $LogFile -Encoding UTF8
+    }
+}
+
 # Hashtable: key = "ip-mac", value = [datetime] first detection
 $known = @{}
+$lastScan = [DateTime]::MinValue
 
 function Get-MacVendor {
     param(
@@ -96,26 +121,33 @@ function Get-NeighborName {
 while ($true) {
     try {
         # Query neighbor table and keep Reachable/Stale entries
-        $neighbors = Get-NetNeighbor -ErrorAction Stop |
-            Where-Object {
-                $_.State -in @('Reachable', 'Stale') -and
-                $_.IPAddress -ne $null -and
-                $_.LinkLayerAddress -and
-                $_.LinkLayerAddress -ne 'ff-ff-ff-ff-ff-ff'
-            }
+        $params = @{
+            ErrorAction = 'SilentlyContinue' # Don't stop if no neighbors found at all
+        }
+        if ($InterfaceAlias) {
+            $params['InterfaceAlias'] = $InterfaceAlias
+        }
+
+        $neighbors = Get-NetNeighbor @params |
+        Where-Object {
+            $_.State -in @('Reachable', 'Stale') -and
+            $_.IPAddress -ne $null -and
+            $_.LinkLayerAddress -and
+            $_.LinkLayerAddress -ne 'ff-ff-ff-ff-ff-ff'
+        }
 
         foreach ($n in $neighbors) {
-            $ip  = $n.IPAddress
+            $ip = $n.IPAddress
             $mac = $n.LinkLayerAddress.ToLower()
             # Explicit format to avoid double quotes in concatenation
-            $id  = '{0}-{1}' -f $ip, $mac
+            $id = '{0}-{1}' -f $ip, $mac
 
             if (-not $known.ContainsKey($id)) {
                 $firstSeen = Get-Date
                 $known[$id] = $firstSeen
 
                 $hostname = Get-NeighborName -Ip $ip
-                $vendor   = Get-MacVendor -Mac $mac
+                $vendor = Get-MacVendor -Mac $mac
                 $nameSuffix = if ($hostname) { " ; name: $hostname" } else { "" }
                 $vendorSuffix = if ($vendor) { " ; vendor: $vendor" } else { "" }
 
@@ -123,6 +155,43 @@ while ($true) {
                     $firstSeen, $ip, $mac, $n.InterfaceAlias, $nameSuffix, $vendorSuffix
 
                 Write-Host $msg -ForegroundColor Green
+
+                if ($LogFile) {
+                    $csvLine = '"{0}","{1}","{2}","{3}","{4}","{5}"' -f `
+                        $firstSeen.ToString('yyyy-MM-dd HH:mm:ss'), $ip, $mac, $n.InterfaceAlias, $hostname, $vendor
+                    $csvLine | Out-File -FilePath $LogFile -Append -Encoding UTF8
+                }
+            }
+        }
+
+        # Active Scanning Logic
+        if ($Scan -and ((Get-Date) - $lastScan).TotalSeconds -ge $ScanIntervalSec) {
+            $lastScan = Get-Date
+            Write-Host "[Scanning] Sending ping sweep to refresh ARP table..." -ForegroundColor DarkGray
+            
+            # Get subnets from relevant interfaces
+            $ifParams = @{ AddressFamily = 'IPv4' }
+            if ($InterfaceAlias) { $ifParams['InterfaceAlias'] = $InterfaceAlias }
+            
+            $ips = Get-NetIPAddress @ifParams | Where-Object { $_.PrefixOrigin -ne 'WellKnown' }
+            
+            foreach ($ipConfig in $ips) {
+                # Calculate subnet range (simplified: just ping the /24 neighbor)
+                # For a robust solution, we'd parse PrefixLength. Here we assume /24 for simplicity or just ping neighbors.
+                # Actually, a better way is to just ping the broadcast or use a range.
+                # Let's try to ping the first 10 and last 10 or just random ones? 
+                # No, to be effective we need to ping existing neighbors to refresh them or scan the subnet.
+                # A full subnet scan in PS is slow. Let's just ping the broadcast address if possible, or rely on the user knowing this is a "noisy" scan.
+                # Better approach for "Active": Ping all *known* neighbors to keep them alive, AND try to ping a few randoms?
+                # Let's stick to a simple implementation: Ping the broadcast address? Windows doesn't always like that.
+                # Let's iterate 1..254 for the current subnet.
+                
+                $base = $ipConfig.IPAddress.Substring(0, $ipConfig.IPAddress.LastIndexOf('.'))
+                1..254 | ForEach-Object {
+                    $target = "$base.$_"
+                    # Fire and forget
+                    Test-Connection -ComputerName $target -Count 1 -Quiet -AsJob | Out-Null
+                }
             }
         }
     }
